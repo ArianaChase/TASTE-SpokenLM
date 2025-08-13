@@ -112,7 +112,7 @@ def get_single_embedding(utt_wav_pair):
         print(f"Error processing {utt} on CPU {process_cpu_id}: {str(e)}")
         return (utt, None)  # 返回 None 表示處理失敗
 
-def multiprocess_inference(utt_wav_pairs, onnx_path, num_processes=8):
+def multiprocess_inference(utt_wav_pairs, onnx_path, num_processes=8, save_interval=None, output_dir=None):
     print(f"Starting multiprocess inference with {num_processes} processes")
     
     # 獲取系統 CPU 核心數量
@@ -129,12 +129,40 @@ def multiprocess_inference(utt_wav_pairs, onnx_path, num_processes=8):
     
     print(f"CPU assignments: {cpu_assignments}")
     
+    # 如果設置了存檔間隔，初始化相關變數
+    if save_interval and output_dir:
+        print(f"Will save intermediate results every {save_interval} steps")
+        processed_results = []
+        step_count = 0
+        checkpoint_count = 0
+    
     # 創建進程池，並傳遞 CPU 分配信息
     with mp.Pool(processes=num_processes, 
                  initializer=initialize_ort_session, 
                  initargs=(onnx_path, cpu_assignments)) as pool:
-        results = list(tqdm(pool.imap_unordered(get_single_embedding, utt_wav_pairs), 
-                           total=len(utt_wav_pairs)))
+        
+        if save_interval and output_dir:
+            # 使用 imap_unordered 逐步處理結果
+            pbar = tqdm(total=len(utt_wav_pairs))
+            for result in pool.imap_unordered(get_single_embedding, utt_wav_pairs):
+                processed_results.append(result)
+                step_count += 1
+                pbar.update(1)
+                
+                # 每達到存檔間隔就保存一次
+                if step_count % save_interval == 0:
+                    checkpoint_count += 1
+                    checkpoint_file = f"{output_dir}/checkpoint_{checkpoint_count:04d}_step_{step_count}.pt"
+                    successful_checkpoint_results = [(utt, emb) for utt, emb in processed_results if emb is not None]
+                    torch.save(successful_checkpoint_results, checkpoint_file)
+                    print(f"\nCheckpoint saved: {checkpoint_file} ({len(successful_checkpoint_results)} embeddings)")
+            
+            pbar.close()
+            results = processed_results
+        else:
+            # 原始的一次性處理方式
+            results = list(tqdm(pool.imap_unordered(get_single_embedding, utt_wav_pairs), 
+                               total=len(utt_wav_pairs)))
     
     # 過濾掉失敗的結果
     successful_results = [(utt, emb) for utt, emb in results if emb is not None]
@@ -175,10 +203,23 @@ def main(args):
             utt2spk[l[0]] = l[1]
     print(f"Loaded {len(utt2spk)} utterance-speaker mappings")
 
+    # 建立 checkpoint 目錄（如果需要的話）
+    checkpoint_dir = None
+    if args.save_interval and args.save_interval > 0:
+        checkpoint_dir = f"{args.dir}/checkpoints"
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        print(f"Checkpoint directory created: {checkpoint_dir}")
+
     # 執行多進程推理
     print(f"Starting inference with ONNX model: {args.onnx_path}")
     utt2embedding, spk2embedding = {}, {}
-    utt_embedding_pairs = multiprocess_inference(utt2wav.items(), args.onnx_path, num_processes=args.threads)
+    utt_embedding_pairs = multiprocess_inference(
+        utt2wav.items(), 
+        args.onnx_path, 
+        num_processes=args.threads,
+        save_interval=args.save_interval if args.save_interval and args.save_interval > 0 else None,
+        output_dir=checkpoint_dir
+    )
     
     # 處理結果
     print("Processing results...")
@@ -194,7 +235,7 @@ def main(args):
     for k, v in spk2embedding.items():
         spk2embedding[k] = torch.tensor(v).mean(dim=0).tolist()
 
-    # 保存結果
+    # 保存最終結果
     utt_output_path = f'{args.dir}/utt2embedding.pt'
     spk_output_path = f'{args.dir}/spk2embedding.pt'
     
@@ -203,6 +244,12 @@ def main(args):
     
     print(f"Saving speaker embeddings to: {spk_output_path}")
     torch.save(spk2embedding, spk_output_path)
+    
+    # 如果有設置存檔間隔，也保存最終的 checkpoint
+    if args.save_interval and args.save_interval > 0:
+        final_checkpoint = f"{checkpoint_dir}/final_checkpoint.pt"
+        torch.save(utt_embedding_pairs, final_checkpoint)
+        print(f"Final checkpoint saved: {final_checkpoint}")
     
     print(f"Processing complete!")
     print(f"- Processed {len(utt2embedding)} utterances")
@@ -222,5 +269,9 @@ if __name__ == "__main__":
                         type=int, 
                         default=32,
                         help='Number of parallel processes (default: 32)')
+    parser.add_argument('--save_interval',
+                        type=int,
+                        default=0,
+                        help='Save intermediate results every N steps (default: 0, disabled)')
     args = parser.parse_args()
     main(args)

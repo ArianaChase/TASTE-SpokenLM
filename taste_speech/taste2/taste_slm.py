@@ -225,8 +225,15 @@ class TasteSLMOut(nn.Module):
             logvar_masked = logvar[lm_taste_mask]  # Apply mask to per-sample logvar
         else:
             logvar_masked = logvar  # Apply mask to broadcasted logvar
-        # KL divergence: -0.5 * mean(exp(logvar) + (mu - target)^2 - 1 - logvar)
-        l_kl = -0.5 * torch.mean(torch.exp(logvar_masked) + (mu[lm_taste_mask] - lm_taste_latent_target[lm_taste_mask])**2 - 1 - logvar_masked)
+        
+        # KL divergence: 
+        l_kl = 0.5 * torch.mean(
+            torch.exp(logvar_masked) + 
+            (mu[lm_taste_mask] - lm_taste_latent_target[lm_taste_mask])**2 * torch.exp(-logvar_masked) - 
+            1 - 
+            logvar_masked
+        )
+
         # Combine MSE and KL losses with equal weighting
         taste_loss = 0.5 * l_reg + 0.5 * l_kl
         return taste_loss

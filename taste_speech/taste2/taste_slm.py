@@ -357,6 +357,7 @@ class TasteSLM(nn.Module):
         delay: int = 1,
         ignore_id: int = -1,
         eos_token_id: int = 151643,
+        text_sampling_callable: Callable = None,
     ):
         """Initialize the TASTE Speech Language Model.
         
@@ -375,7 +376,7 @@ class TasteSLM(nn.Module):
         super().__init__()
         assert delay > 0
 
-        # Register taste tokenizer as non-persistent buffer
+        # Register taste tokenizer
         self._taste_tokenizer = taste_tokenizer
 
         # Core model components
@@ -388,6 +389,22 @@ class TasteSLM(nn.Module):
         self.delay = delay  # Temporal alignment delay
         self.ignore_id = ignore_id  # Token ID to ignore in loss computation
         self.eos_token_id = eos_token_id  # End-of-sequence token
+        
+        self.text_sampling_callable = text_sampling_callable
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        """Override state_dict to exclude taste_tokenizer"""
+        state = super().state_dict(destination, prefix, keep_vars)
+        # Remove all keys containing taste_tokenizer
+        keys_to_remove = [k for k in state.keys() if '_taste_tokenizer' in k]
+        for key in keys_to_remove:
+            del state[key]
+        return state
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Override load_state_dict to handle missing taste_tokenizer"""
+        # Load state dict normally, taste_tokenizer will need to be set separately
+        return super().load_state_dict(state_dict, strict=False)
 
     def prepare_lm_input_target(
         self, 

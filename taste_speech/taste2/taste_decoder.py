@@ -105,7 +105,7 @@ class TasteS3GenerationLM(Qwen2LM):
         **kwargs,
     ) -> Generator[torch.Tensor, None, None]:
 
-        device = text.device
+        # device = text_token.device
 
         text_token_emb = self.llm.model.model.embed_tokens(text_token)
 
@@ -125,8 +125,8 @@ class TasteS3GenerationLM(Qwen2LM):
         lm_input = torch.concat([sos_eos_emb, mixed_token_emb, task_id_emb], dim=1)
 
         # 4. cal min/max_length
-        min_len = int((text_len - prompt_text_len) * min_token_text_ratio)
-        max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
+        min_len = int(text_token_len * min_token_text_ratio)
+        max_len = int(text_token_len * max_token_text_ratio)
 
         # 5. step by step decode
         for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):

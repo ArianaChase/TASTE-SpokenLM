@@ -595,6 +595,7 @@ class TasteSLM(nn.Module):
                 hidden_pred, cache = self.slm.forward_one_step(lm_input,
                                                           masks=torch.tril(torch.ones((1, lm_input.shape[1], lm_input.shape[1]), device=lm_input.device)).to(torch.bool),
                                                           cache=cache)
+
                 text_logp = self.slm.model.lm_head(hidden_pred[:, -1]).log_softmax(dim=-1)
                 top_text_ids = self.text_sampling_callable(text_logp.squeeze(dim=0))
 
@@ -605,6 +606,7 @@ class TasteSLM(nn.Module):
 
                 if len(text_out_tokens) > max_len or text_stop_sign: # text sampling finished
                     text_stop_sign = True
+
                     text_emb = self.fusing_module.pad_text_embed.unsqueeze(0).unsqueeze(0)
                 else:
                     text_emb = self.slm.model.model.embed_tokens(top_text_ids.unsqueeze(0))

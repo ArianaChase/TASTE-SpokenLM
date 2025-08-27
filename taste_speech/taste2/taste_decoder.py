@@ -114,11 +114,47 @@ class TasteS3GenerationLM(Qwen2LM):
             tokenized = self.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
             taste_token_emb = tokenized['taste_token_emb']
 
+            print(text_token_emb.shape, taste_token_emb.shape)
             # 1-3. mixing
             mixed_token_emb = self.taste_decoder_mixer(text_token_emb, taste_token_emb, text_token_len)
         else:
             mixed_token_emb = text_token_emb
 
+        # 3. concat llm_input
+        sos_eos_emb = self.llm_embedding.weight[self.sos_eos].reshape(1, 1, -1)
+        task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1)
+        lm_input = torch.concat([sos_eos_emb, mixed_token_emb, task_id_emb], dim=1)
+
+        # 4. cal min/max_length
+        min_len = int(text_token_len * min_token_text_ratio)
+        max_len = int(text_token_len * max_token_text_ratio)
+
+        # 5. step by step decode
+        for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
+            yield token
+            
+    @torch.inference_mode()
+    def inference_for_taste_emb(
+        self,
+        text_token: torch.Tensor,
+        text_token_len: torch.Tensor,
+        taste_token_emb: torch.Tensor,
+        sampling: int = 25,
+        max_token_text_ratio: float = 20,
+        min_token_text_ratio: float = 2,
+        uuid: str = '',
+        **kwargs,
+    ):
+        text_token_emb = self.llm.model.model.embed_tokens(text_token)
+        
+        if not self.is_text_only:
+            # 1-3. mixing
+            
+            print(text_token_emb.shape, taste_token_emb.shape)
+            mixed_token_emb = self.taste_decoder_mixer(text_token_emb, taste_token_emb, text_token_len)
+        else:
+            mixed_token_emb = text_token_emb
+        
         # 3. concat llm_input
         sos_eos_emb = self.llm_embedding.weight[self.sos_eos].reshape(1, 1, -1)
         task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1)

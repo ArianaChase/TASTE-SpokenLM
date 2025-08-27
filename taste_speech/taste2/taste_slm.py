@@ -17,7 +17,7 @@ and maintains temporal coherence through a delay mechanism.
 
 import torch
 import torch.nn as nn
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, Callable, Generator
 from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 
 from cosyvoice.utils.common import th_accuracy

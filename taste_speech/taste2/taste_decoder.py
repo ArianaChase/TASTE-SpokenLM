@@ -96,8 +96,9 @@ class TasteS3GenerationLM(Qwen2LM):
         self,
         text_token: torch.Tensor,
         text_token_len: torch.Tensor,
-        audio_feature: torch.Tensor,
-        audio_feature_len: torch.Tensor,
+        audio_feature: Optional[torch.Tensor] = None,
+        audio_feature_len: Optional[torch.Tensor] = None,
+        taste_token_emb: Optional[torch.Tensor] = None,
         sampling: int = 25,
         max_token_text_ratio: float = 20,
         min_token_text_ratio: float = 2,
@@ -105,14 +106,15 @@ class TasteS3GenerationLM(Qwen2LM):
         **kwargs,
     ) -> Generator[torch.Tensor, None, None]:
 
-        # device = text_token.device
+        assert (taste_token_emb is not None) ^  (audio_feature is not None and audio_feature_len is not None)
 
         text_token_emb = self.llm.model.model.embed_tokens(text_token)
 
         if not self.is_text_only:
             # 1-2. encode taste_token
-            tokenized = self.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
-            taste_token_emb = tokenized['taste_token_emb']
+            if taste_token_emb is None:
+                tokenized = self.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
+                taste_token_emb = tokenized['taste_token_emb']
 
             # 1-3. mixing
             mixed_token_emb = self.taste_decoder_mixer(text_token_emb, taste_token_emb, text_token_len)

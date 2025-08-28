@@ -291,7 +291,7 @@ class TasteSLMOut(nn.Module):
             sigma = torch.exp(0.5 * logvar)
 
         # Apply reparameterization trick during training for stochastic sampling
-        if self.training and self.conduct_reparameterization:
+        if self.conduct_reparameterization:
             z = self._reparameterize(mu, sigma)
         else:
             # Deterministic prediction: use mean + standard deviation
@@ -356,10 +356,11 @@ class TasteSLM(nn.Module):
         llm_input_size: int,
         llm_output_size: int,
         d: int,
-        taste_tokenizer: torch.nn.Module,
+        taste_stage1: torch.nn.Module,
         slm: torch.nn.Module,
         fusing_module: torch.nn.Module,
         out_module: torch.nn.Module,
+        path_reload_taste_stage1: str = '',
         delay: int = 1,
         ignore_id: int = -1,
         eos_token_id: int = 151643,
@@ -383,7 +384,9 @@ class TasteSLM(nn.Module):
         assert delay > 0
 
         # Register taste tokenizer
-        self._taste_tokenizer = taste_tokenizer
+        if path_reload_taste_stage1:
+            taste_stage1 = self._reload_taste_stage1(taste_stage1, path_reload_taste_stage1)
+        self.taste_stage1 = taste_stage1
 
         # Core model components
         self.slm = slm  # Speech language model backbone
@@ -398,19 +401,10 @@ class TasteSLM(nn.Module):
         
         self.text_sampling_callable = text_sampling_callable
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
-        """Override state_dict to exclude taste_tokenizer"""
-        state = super().state_dict(destination, prefix, keep_vars)
-        # Remove all keys containing taste_tokenizer
-        keys_to_remove = [k for k in state.keys() if '_taste_tokenizer' in k]
-        for key in keys_to_remove:
-            del state[key]
-        return state
-
-    def load_state_dict(self, state_dict, strict=True):
-        """Override load_state_dict to handle missing taste_tokenizer"""
-        # Load state dict normally, taste_tokenizer will need to be set separately
-        return super().load_state_dict(state_dict, strict=False)
+    def _reload_taste_stage1(self, taste_stage1, path_reload_taste_stage1):
+        checkpoint = torch.load(path_reload_taste_stage1, map_location='cpu')
+        taste_stage1.load_state_dict(checkpoint, strict=True)
+        return taste_stage1
 
     def prepare_lm_input_target(
         self, 
@@ -463,7 +457,8 @@ class TasteSLM(nn.Module):
             
             # Create taste embedding target: pad with zeros for delay, then use shifted embeddings  
             # Target length should match input length: taste_len + delay
-            vq_module = self._taste_tokenizer.vq.rvq
+            vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
+
             this_taste_latent_target = torch.tensor(
                 [[0.0 for _ in range(self.d)] for _ in range(self.delay)] + vq_module.get_code_from_indices(taste_token[i]).tolist()
             )
@@ -534,7 +529,7 @@ class TasteSLM(nn.Module):
         text_token_emb = self.slm.model.model.embed_tokens(text_token)
 
         # Step 2: Encode audio features to taste token embeddings using taste tokenizer
-        tokenized = self._taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
+        tokenized = self.taste_stage1.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
         taste_token_emb = tokenized['taste_token_emb']
         taste_token = tokenized['quantized_indices']
 
@@ -578,7 +573,7 @@ class TasteSLM(nn.Module):
         text_token_emb = self.slm.model.model.embed_tokens(text_token)
 
         # 1-2. encode taste_token
-        tokenized = self._taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
+        tokenized = self.taste_stage1.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
         taste_token_emb = tokenized['taste_token_emb']
 
         # lm_input
@@ -623,7 +618,7 @@ class TasteSLM(nn.Module):
                 if len(text_out_tokens) > self.delay: # taste sampling started
                     # hidden_pred[:, -1]
                     z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
-                    vq_module = self._taste_tokenizer.vq.rvq
+                    vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
                     taste_emb = vq_module.project_out(z)
                     if len(text_out_tokens) < i-self.delay:
                         break  # taste sampling finished

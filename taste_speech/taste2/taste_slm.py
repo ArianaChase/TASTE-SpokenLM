@@ -37,6 +37,7 @@ class TasteSLMFusing(nn.Module):
     """
     def __init__(
         self,
+        tokenizer_output_size: int,
         llm_input_size: int,
         class_name: str = 'weighted_sum',
     ):
@@ -60,6 +61,8 @@ class TasteSLMFusing(nn.Module):
         self.pad_text_embed = nn.parameter.Parameter(
             torch.zeros(llm_input_size, dtype=torch.float32)
         )
+
+        self.taste_embed_in = nn.Linear(tokenizer_output_size, llm_input_size, bias=True)
 
     def forward(
         self,
@@ -92,7 +95,7 @@ class TasteSLMFusing(nn.Module):
         shifted_taste_token_emb = torch.concat(
             [
                 self.pad_taste_embed.unsqueeze(0).unsqueeze(0).repeat(1, delay, 1),
-                taste_token_emb,
+                self.taste_embed_in(taste_token_emb),
             ], dim=1
         )
         

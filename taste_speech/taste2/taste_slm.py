@@ -37,8 +37,8 @@ class TasteSLMFusing(nn.Module):
     """
     def __init__(
         self,
-        tokenizer_output_size: int,
         llm_input_size: int,
+        tokenizer_output_size: int = None,
         class_name: str = 'weighted_sum',
     ):
         """Initialize the TasteSLMFusing module.
@@ -49,6 +49,9 @@ class TasteSLMFusing(nn.Module):
                              Default is 'weighted_sum'
         """
         super().__init__()
+        if tokenizer_output_size is None:
+            tokenizer_output_size = llm_input_size
+
         # Initialize the fusion mixer based on the specified class name
         self.mixer = TTS_INPUT_FUSION_CLASSES[class_name]()
         
@@ -579,14 +582,17 @@ class TasteSLM(nn.Module):
         taste_token_emb = tokenized['taste_token_emb']
 
         # lm_input
-        lm_input = self.fusing_module(text_token_emb, taste_token_emb, text_token_len, self.delay)
+        fused = self.fusing_module(text_token_emb, taste_token_emb, text_token_len, self.delay)
+        lm_input = fused[:, :-1 * self.delay, :]  # truncate to text end
+        reminding_taste_token_emb = taste_token_emb[:, -1 * self.delay:, :]
 
         # 5. step by step decode
-        for text_token, taste_emb in self.inference_wrapper(lm_input, max_len, uuid):
+        for text_token, taste_emb in self.inference_wrapper(lm_input, reminding_taste_token_emb, max_len, uuid):
             yield (text_token, taste_emb)
 
     @torch.inference_mode()
-    def inference_wrapper(self, lm_input, max_len, uuid):
+    def inference_wrapper(self, lm_input, reminding_taste_token_emb, max_len, uuid):
+        assert reminding_taste_token_emb.size(1) == self.delay
         if hasattr(self, 'vllm'):
             raise NotImplementedError
             
@@ -623,6 +629,6 @@ class TasteSLM(nn.Module):
                         break  # taste sampling finished
                     yield (text_out_tokens[i-self.delay], taste_emb)
                 else:
-                    taste_emb = self.fusing_module.pad_taste_embed.unsqueeze(0).unsqueeze(0)
+                    taste_emb = reminding_taste_token_emb[:, i, :].unsqueeze(1)
 
                 lm_input = self.fusing_module(text_emb, taste_emb, torch.tensor([1]), delay=0).reshape(1, 1, -1)

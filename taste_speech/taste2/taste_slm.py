@@ -564,20 +564,24 @@ class TasteSLM(nn.Module):
         self,
         text_token: torch.Tensor,
         text_token_len: torch.Tensor,
-        audio_feature: torch.Tensor,
-        audio_feature_len: torch.Tensor,
+        audio_feature: Optional[torch.Tensor] = None,
+        audio_feature_len: Optional[torch.Tensor] = None,
+        taste_token_emb: Optional[torch.Tensor] = None,
         sampling: int = 25,
         max_len: int = 20,
+        min_len: int = 5,
         uuid: str = '',
         **kwargs,
     ) -> Generator[Tuple[torch.Tensor, torch.Tensor], None, None]:
         assert text_token.size(0) == 1
+        assert (taste_token_emb is not None) ^  (audio_feature is not None and audio_feature_len is not None)
 
         text_token_emb = self.slm.model.model.embed_tokens(text_token)
 
         # 1-2. encode taste_token
-        tokenized = self.taste_stage1.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
-        taste_token_emb = tokenized['taste_token_emb']
+        if taste_token_emb is None:
+            tokenized = self.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
+            taste_token_emb = tokenized['taste_token_emb']
 
         # lm_input
         fused = self.fusing_module(text_token_emb, taste_token_emb, text_token_len, self.delay)
@@ -585,48 +589,71 @@ class TasteSLM(nn.Module):
         reminding_taste_token_emb = taste_token_emb[:, -1 * self.delay:, :]
 
         # 5. step by step decode
-        for text_token, taste_emb in self.inference_wrapper(lm_input, reminding_taste_token_emb, max_len, uuid):
+        for text_token, taste_emb in self.inference_wrapper(lm_input, reminding_taste_token_emb, max_len, min_len, uuid):
             yield (text_token, taste_emb)
 
+    def sampling_ids(
+            self,
+            weighted_scores: torch.Tensor,
+            ignore_eos: bool = True,
+    ):
+        num_trials, max_trials = 0, 100
+        while True:
+            top_ids = self.text_sampling_callable(weighted_scores)
+            if (not ignore_eos) or (top_ids != self.eos_token_id):
+                break
+            num_trials += 1
+            if num_trials > max_trials:
+                raise RuntimeError('sampling reaches max_trials {} and still get eos when ignore_eos is True, check your input!'.format(max_trials))
+        return top_ids
+
     @torch.inference_mode()
-    def inference_wrapper(self, lm_input, reminding_taste_token_emb, max_len, uuid):
+    def inference_wrapper(self, lm_input, reminding_taste_token_emb, max_len, min_len, uuid):
         assert reminding_taste_token_emb.size(1) == self.delay
         if hasattr(self, 'vllm'):
             raise NotImplementedError
             
         else:
-            text_out_tokens = []
+            text_out_tokens_queue = []
             cache = None
-            text_stop_sign = False
-            for i in range(max_len + self.delay):
-                hidden_pred, cache = self.slm.forward_one_step(lm_input,
-                                                          masks=torch.tril(torch.ones((1, lm_input.shape[1], lm_input.shape[1]), device=lm_input.device)).to(torch.bool),
-                                                          cache=cache)
-
+            for i in range(max_len):
+                # sampling text
+                hidden_pred, cache = self.slm.forward_one_step(
+                    lm_input,
+                    masks=torch.tril(torch.ones((1, lm_input.shape[1], lm_input.shape[1]), device=lm_input.device)).to(torch.bool),
+                    cache=cache
+                )
                 text_logp = self.slm.model.lm_head(hidden_pred[:, -1]).log_softmax(dim=-1)
-                top_text_ids = self.text_sampling_callable(text_logp.squeeze(dim=0))
+                top_text_ids = self.sampling_ids(text_logp.squeeze(dim=0), ignore_eos=(True if i < min_len else False))
+                text_emb = self.slm.model.model.embed_tokens(top_text_ids.unsqueeze(0))
 
+                # stop sampling text
                 if top_text_ids == self.eos_token_id:
-                    text_stop_sign = True
-                if not text_stop_sign:
-                    text_out_tokens.append(top_text_ids)
+                    break
 
-                if len(text_out_tokens) > max_len or text_stop_sign: # text sampling finished
-                    text_stop_sign = True
-
-                    text_emb = self.fusing_module.pad_text_embed.unsqueeze(0).unsqueeze(0)
-                else:
-                    text_emb = self.slm.model.model.embed_tokens(top_text_ids.unsqueeze(0))
-
-                if len(text_out_tokens) > self.delay: # taste sampling started
-                    # hidden_pred[:, -1]
+                # sampling taste
+                if i >= self.delay:
                     z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
                     vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
                     taste_emb = vq_module.project_out(z)
-                    if len(text_out_tokens) < i-self.delay:
-                        break  # taste sampling finished
-                    yield (text_out_tokens[i-self.delay], taste_emb)
+                    yield (text_out_tokens_queue.pop(0), taste_emb)
                 else:
                     taste_emb = reminding_taste_token_emb[:, i, :].unsqueeze(1)
 
+                text_out_tokens_queue.append(top_text_ids)
                 lm_input = self.fusing_module(text_emb, taste_emb, torch.tensor([1]), delay=0).reshape(1, 1, -1)
+
+            # (reminding) sampling taste
+            while len(text_out_tokens_queue) > 0:
+                z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
+                taste_emb = vq_module.project_out(z)
+                yield (text_out_tokens_queue.pop(0), taste_emb)
+
+                text_emb = self.fusing_module.pad_text_embed.unsqueeze(0).unsqueeze(0)
+                lm_input = self.fusing_module(text_emb, taste_emb, torch.tensor([1]), delay=0).reshape(1, 1, -1)
+                hidden_pred, cache = self.slm.forward_one_step(
+                    lm_input,
+                    masks=torch.tril(torch.ones((1, lm_input.shape[1], lm_input.shape[1]), device=lm_input.device)).to(torch.bool),
+                    cache=cache
+                )

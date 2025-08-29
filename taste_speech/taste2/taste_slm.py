@@ -401,6 +401,10 @@ class TasteSLM(nn.Module):
         
         self.text_sampling_callable = text_sampling_callable
 
+    def reload(self, path, device):
+        checkpoint = torch.load(path, map_location=device)
+        self.load_state_dict(checkpoint, strict=True)
+
     def _reload_taste_stage1(self, taste_stage1, path_reload_taste_stage1):
         checkpoint = torch.load(path_reload_taste_stage1, map_location='cpu')
         taste_stage1.load_state_dict(checkpoint, strict=True)
@@ -452,25 +456,24 @@ class TasteSLM(nn.Module):
             # Create text target: shift tokens by 1, add EOS, pad with ignore tokens for delay
             # Target length should match input length: text_len + delay
             this_lm_text_target = torch.tensor(
-                text_token[i].tolist()[1:] + [self.eos_token_id] + [self.ignore_id] * self.delay
+                text_token[i].tolist()[1:] + [self.eos_token_id] + [self.ignore_id] * (self.delay - 1)
             )
             
             # Create taste embedding target: pad with zeros for delay, then use shifted embeddings  
             # Target length should match input length: taste_len + delay
             vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
-
             this_taste_latent_target = torch.tensor(
-                [[0.0 for _ in range(self.d)] for _ in range(self.delay)] + vq_module.get_code_from_indices(taste_token[i]).tolist()
+                [[0.0 for _ in range(self.d)] for _ in range(self.delay - 1)] + vq_module.get_code_from_indices(taste_token[i]).tolist()
             )
             
             # Create mask for taste tokens: 0 for delay positions, 1 for valid taste positions
             # Mask length should match input length: taste_len + delay
             this_lm_taste_mask = torch.tensor(
-                [False] * self.delay + [True] * taste_token[i].size(0)
+                [False] * (self.delay - 1) + [True] * taste_token[i].size(0)
             )
             
             # Fuse text and taste embeddings for this sequence
-            this_lm_input = self.fusing_module(text_token_emb[i].unsqueeze(0), taste_token_emb[i].unsqueeze(0), text_token_len[i:i+1], self.delay)[0]
+            this_lm_input = self.fusing_module(text_token_emb[i].unsqueeze(0), taste_token_emb[i].unsqueeze(0), text_token_len[i:i+1], self.delay)[0, :-1]
 
             # Collect all processed sequences (remove the batch dimension for pad_sequence)
             lm_text_target.append(this_lm_text_target)

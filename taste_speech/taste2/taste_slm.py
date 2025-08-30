@@ -40,6 +40,7 @@ class TasteSLMFusing(nn.Module):
         llm_input_size: int,
         tokenizer_output_size: int = None,
         class_name: str = 'weighted_sum',
+        fuse_config = dict(),
     ):
         """Initialize the TasteSLMFusing module.
         
@@ -53,7 +54,7 @@ class TasteSLMFusing(nn.Module):
             tokenizer_output_size = llm_input_size
 
         # Initialize the fusion mixer based on the specified class name
-        self.mixer = TTS_INPUT_FUSION_CLASSES[class_name]()
+        self.mixer = TTS_INPUT_FUSION_CLASSES[class_name](**fuse_config)
         
         # Learnable padding embeddings for taste tokens when delay padding is needed
         self.pad_taste_embed = nn.parameter.Parameter(

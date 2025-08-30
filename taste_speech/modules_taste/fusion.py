@@ -101,7 +101,7 @@ class WeightedSum(nn.Module):
         if weight_init_type == 'balance':
             self.weights = nn.Parameter(torch.tensor([1., 1.]), requires_grad=use_trainable_weight)
         elif weight_init_type == 'zero_audio':
-            self.weights = nn.Parameter(torch.tensor([-2., 2.]), requires_grad=use_trainable_weight)
+            self.weights = nn.Parameter(torch.tensor([-3., 3.]), requires_grad=use_trainable_weight)
         self.use_layer_norm = use_layer_norm
         if self.use_layer_norm:
             # TODO: Maybe we can add layernorm here. Currently I think it is not necessary. 

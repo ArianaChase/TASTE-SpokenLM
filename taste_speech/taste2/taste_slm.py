@@ -363,6 +363,7 @@ class TasteSLM(nn.Module):
         out_module: torch.nn.Module,
         path_reload_taste_stage1: str = '',
         delay: int = 1,
+        use_continue: bool = False,
         ignore_id: int = -1,
         eos_token_id: int = 151643,
         text_sampling_callable: Callable = None,
@@ -393,10 +394,13 @@ class TasteSLM(nn.Module):
         self.slm = slm  # Speech language model backbone
         self.fusing_module = fusing_module  # Multimodal fusion module
         self.out_module = out_module  # Output prediction module
-        
+        if use_continue:
+            assert taste_stage1.taste_tokenizer.neck_on is True
+
         # Configuration parameters
         self.d = d
         self.delay = delay  # Temporal alignment delay
+        self.use_continue = use_continue
         self.ignore_id = ignore_id  # Token ID to ignore in loss computation
         self.eos_token_id = eos_token_id  # End-of-sequence token
         
@@ -416,40 +420,17 @@ class TasteSLM(nn.Module):
         text_token: torch.Tensor, 
         text_token_emb: torch.Tensor, 
         text_token_len: torch.Tensor, 
-        taste_token: torch.Tensor, 
-        taste_token_emb: torch.Tensor
+        taste_latent: torch.Tensor = None, 
+        taste_token_emb: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Prepare language model inputs and targets from text and taste tokens.
-        
-        This method processes the input tokens to create properly aligned sequences
-        for the language model training. It handles:
-        1. Sequence unpadding and individual processing
-        2. Target creation with EOS tokens and delay padding
-        3. Multimodal fusion of text and taste embeddings
-        4. Re-padding for batch processing
-        
-        Args:
-            text_token (torch.Tensor): Input text tokens, shape (B, L)
-            text_token_emb (torch.Tensor): Text token embeddings, shape (B, L, D)
-            text_token_len (torch.Tensor): Length of each text sequence, shape (B,)
-            taste_token (torch.Tensor): Input taste tokens, shape (B, T)
-            taste_token_emb (torch.Tensor): Taste token embeddings, shape (B, T, D)
-            
-        Returns:
-            Tuple containing:
-                - lm_text_target: Target text tokens for LM training
-                - lm_taste_latent_target: Target taste embeddings
-                - lm_taste_mask: Mask indicating valid taste positions
-                - lm_input: Fused input embeddings for the language model
-                - lm_input_len: Length of each fused sequence
-        """
+
         # Initialize lists to collect processed sequences
         lm_text_target, lm_taste_latent_target, lm_taste_mask, lm_input = [], [], [], []
         
         # Unpad sequences to remove batch-level padding and process individually
         text_token = unpad_sequence(text_token, text_token_len.cpu(), batch_first=True)
         text_token_emb = unpad_sequence(text_token_emb, text_token_len.cpu(), batch_first=True)
-        taste_token = unpad_sequence(taste_token, text_token_len.cpu(), batch_first=True)
+        taste_latent = unpad_sequence(taste_latent, text_token_len.cpu(), batch_first=True)
         taste_token_emb = unpad_sequence(taste_token_emb, text_token_len.cpu(), batch_first=True)
         
         # Process each sequence in the batch individually
@@ -459,18 +440,15 @@ class TasteSLM(nn.Module):
             this_lm_text_target = torch.tensor(
                 text_token[i].tolist()[1:] + [self.eos_token_id] + [self.ignore_id] * (self.delay - 1)
             )
-            
-            # Create taste embedding target: pad with zeros for delay, then use shifted embeddings  
-            # Target length should match input length: taste_len + delay
-            vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
+
             this_taste_latent_target = torch.tensor(
-                [[0.0 for _ in range(self.d)] for _ in range(self.delay - 1)] + vq_module.get_code_from_indices(taste_token[i]).tolist()
+                [[0.0 for _ in range(self.d)] for _ in range(self.delay - 1)] + taste_latent[i].tolist()
             )
             
             # Create mask for taste tokens: 0 for delay positions, 1 for valid taste positions
             # Mask length should match input length: taste_len + delay
             this_lm_taste_mask = torch.tensor(
-                [False] * (self.delay - 1) + [True] * taste_token[i].size(0)
+                [False] * (self.delay - 1) + [True] * taste_token_emb[i].size(0)
             )
             
             # Fuse text and taste embeddings for this sequence
@@ -535,11 +513,13 @@ class TasteSLM(nn.Module):
         # Step 2: Encode audio features to taste token embeddings using taste tokenizer
         tokenized = self.taste_stage1.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
         taste_token_emb = tokenized['taste_token_emb']
-        taste_token = tokenized['quantized_indices']
+        taste_latent = tokenized['taste_latent']
 
         # Step 3: Prepare aligned language model inputs and targets
         lm_text_target, lm_taste_latent_target, lm_taste_mask, lm_input, lm_input_len = \
-            self.prepare_lm_input_target(text_token, text_token_emb, text_token_len, taste_token, taste_token_emb)
+            self.prepare_lm_input_target(text_token, text_token_emb, text_token_len, 
+                taste_latent=taste_latent,
+                taste_token_emb=taste_token_emb)
         
         # Move prepared tensors to device
         lm_text_target = lm_text_target.to(device)
@@ -634,9 +614,13 @@ class TasteSLM(nn.Module):
 
                 # sampling taste
                 if i >= self.delay:
-                    z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
-                    vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
-                    taste_emb = vq_module.project_out(z)
+                    if self.use_continue:
+                        z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                        taste_emb = self.taste_stage1.neck_proj_out(z)
+                    else:
+                        z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                        vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
+                        taste_emb = vq_module.project_out(z)
                     yield (text_out_tokens_queue.pop(0), taste_emb)
                 else:
                     taste_emb = reminding_taste_token_emb[:, i, :].unsqueeze(1)
@@ -646,9 +630,13 @@ class TasteSLM(nn.Module):
 
             # (reminding) sampling taste
             while len(text_out_tokens_queue) > 0:
-                z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
-                vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
-                taste_emb = vq_module.project_out(z)
+                if self.use_continue:
+                    z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                    taste_emb = self.taste_stage1.neck_proj_out(z)
+                else:
+                    z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                    vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
+                    taste_emb = vq_module.project_out(z)
                 yield (text_out_tokens_queue.pop(0), taste_emb)
 
                 text_emb = self.fusing_module.pad_text_embed.unsqueeze(0).unsqueeze(0)

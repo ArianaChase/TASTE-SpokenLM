@@ -17,6 +17,8 @@ class TasteTokenizer(nn.Module):
         encoder_input_size=896,
         quantization_on=False,
         kwargs_for_quantizer: Dict = None,
+        neck_on=False,
+        d_neck=None,
     ):
         super().__init__()
         self.quantization_on = quantization_on
@@ -44,6 +46,10 @@ class TasteTokenizer(nn.Module):
             self.vq = QUANTIZER_CLASSES[quantizer_class](
                 **replaced_kwargs,
             )
+        elif neck_on:
+            self.neck_on = neck_on
+            self.neck_proj_in = nn.Linear(encoder_input_size, d_neck)
+            self.neck_proj_out = nn.Linear(d_neck, encoder_input_size)
 
     def load_from_cosyvoice_ckpt(self, pt_path):
         raise NotImplementedError
@@ -88,11 +94,16 @@ class TasteTokenizer(nn.Module):
                 taste_token_emb,
                 mask=generate_mask_from_length(taste_token_emb_len)
             )
+            taste_latent = self.vq.rvq.get_code_from_indices(quantized_results['quantized_indices'])
             taste_token_emb = quantized_results['quantized_feats'] 
+        elif self.neck_on:
+            taste_latent = self.neck_proj_in(taste_token_emb)
+            taste_token_emb = self.neck_proj_out(taste_latent)
 
         result = {
             'taste_token_emb': taste_token_emb,
             'taste_token_emb_len': taste_token_emb_len,
+            'taste_latent': taste_latent,
         }
         if self.quantization_on:
             if self.training:

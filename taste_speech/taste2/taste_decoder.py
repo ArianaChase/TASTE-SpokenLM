@@ -61,7 +61,7 @@ class TasteS3GenerationLM(Qwen2LM):
         audio_feature_len = batch['audio_feature_len'].to(device)
 
         # 1-1. encode text_token
-        text_token_emb = self.llm.model.model.embed_tokens(text_token)
+        text_token_emb = self.llm.forward_embed_tokens(text_token).float()
 
         if not self.is_text_only:
             # 1-2. encode taste_token
@@ -82,7 +82,7 @@ class TasteS3GenerationLM(Qwen2LM):
 
         # 4. run lm forward
         lm_output, lm_output_mask = self.llm(lm_input, lm_input_len.to(device))
-        logits = self.llm_decoder(lm_output)
+        logits = self.llm_decoder(lm_output.float())
         loss = self.criterion_ce(logits, lm_target.to(device))
         acc = th_accuracy(logits.view(-1, self.speech_token_size + 3), lm_target, ignore_label=IGNORE_ID)
 
@@ -108,7 +108,7 @@ class TasteS3GenerationLM(Qwen2LM):
 
         assert (taste_token_emb is not None) ^  (audio_feature is not None and audio_feature_len is not None)
 
-        text_token_emb = self.llm.model.model.embed_tokens(text_token)
+        text_token_emb = self.llm.forward_embed_tokens(text_token).float()
 
         if not self.is_text_only:
             # 1-2. encode taste_token

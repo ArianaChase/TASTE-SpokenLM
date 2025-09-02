@@ -508,7 +508,7 @@ class TasteSLM(nn.Module):
         audio_feature_len = batch['audio_feature_len'].to(device)
 
         # Step 1: Encode text tokens using the SLM's embedding layer
-        text_token_emb = self.slm.get_embed_tokens()(text_token)
+        text_token_emb = self.slm.forward_embed_tokens(text_token)
 
         # Step 2: Encode audio features to taste token embeddings using taste tokenizer
         tokenized = self.taste_stage1.taste_tokenizer(text_token, text_token_len, audio_feature, audio_feature_len)
@@ -517,7 +517,7 @@ class TasteSLM(nn.Module):
 
         # Step 3: Prepare aligned language model inputs and targets
         lm_text_target, lm_taste_latent_target, lm_taste_mask, lm_input, lm_input_len = \
-            self.prepare_lm_input_target(text_token, text_token_emb, text_token_len, 
+            self.prepare_lm_input_target(text_token, text_token_emb.float(), text_token_len, 
                 taste_latent=taste_latent,
                 taste_token_emb=taste_token_emb)
         
@@ -530,11 +530,11 @@ class TasteSLM(nn.Module):
         # Step 4: Run language model forward pass
         lm_output, lm_output_mask = self.slm(lm_input, lm_input_len)
         # Generate text logits using the language model head
-        text_logit = self.slm.get_lm_head()(lm_output)
+        text_logit = self.slm.forward_lm_head(lm_output)
         
         # Step 5: Compute dual-modal outputs and losses
         outputs = self.out_module(
-            lm_output, text_logit, 
+            lm_output.float(), text_logit, 
             lm_text_target, lm_taste_latent_target, lm_taste_mask, 
         )
         # Output dictionary includes: loss, text_acc, taste_loss, z
@@ -557,7 +557,7 @@ class TasteSLM(nn.Module):
         assert text_token.size(0) == 1
         assert (taste_token_emb is not None) ^  (audio_feature is not None and audio_feature_len is not None)
 
-        text_token_emb = self.slm.get_embed_tokens()(text_token)
+        text_token_emb = self.slm.forward_embed_tokens(text_token).float()
 
         # 1-2. encode taste_token
         if taste_token_emb is None:
@@ -604,9 +604,9 @@ class TasteSLM(nn.Module):
                     masks=torch.tril(torch.ones((1, lm_input.shape[1], lm_input.shape[1]), device=lm_input.device)).to(torch.bool),
                     cache=cache
                 )
-                text_logp = self.slm.get_lm_head()(hidden_pred[:, -1]).log_softmax(dim=-1)
+                text_logp = self.slm.forward_lm_head(hidden_pred[:, -1]).log_softmax(dim=-1)
                 top_text_ids = self.sampling_ids(text_logp.squeeze(dim=0), ignore_eos=(True if i < min_len else False))
-                text_emb = self.slm.get_embed_tokens()(top_text_ids.unsqueeze(0))
+                text_emb = self.slm.forward_embed_tokens(top_text_ids.unsqueeze(0)).float()
 
                 # stop sampling text
                 if top_text_ids == self.eos_token_id:
@@ -615,10 +615,10 @@ class TasteSLM(nn.Module):
                 # sampling taste
                 if i >= self.delay:
                     if self.use_continue:
-                        z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                        z, _, _ = self.out_module.predict_taste_latent(hidden_pred.float())
                         taste_emb = self.taste_stage1.neck_proj_out(z)
                     else:
-                        z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                        z, _, _ = self.out_module.predict_taste_latent(hidden_pred.float())
                         vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
                         taste_emb = vq_module.project_out(z)
                     yield (text_out_tokens_queue.pop(0), taste_emb)
@@ -631,10 +631,10 @@ class TasteSLM(nn.Module):
             # (reminding) sampling taste
             while len(text_out_tokens_queue) > 0:
                 if self.use_continue:
-                    z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                    z, _, _ = self.out_module.predict_taste_latent(hidden_pred.float())
                     taste_emb = self.taste_stage1.neck_proj_out(z)
                 else:
-                    z, _, _ = self.out_module.predict_taste_latent(hidden_pred)
+                    z, _, _ = self.out_module.predict_taste_latent(hidden_pred.float())
                     vq_module = self.taste_stage1.taste_tokenizer.vq.rvq
                     taste_emb = vq_module.project_out(z)
                 yield (text_out_tokens_queue.pop(0), taste_emb)

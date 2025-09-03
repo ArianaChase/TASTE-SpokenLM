@@ -1,5 +1,6 @@
 
-from typing import Dict, Optional, Callable, List, Generator
+from typing import Dict, Optional, Callable, List, Generator, Tuple
+import logging
 
 import torch
 from torch import nn
@@ -136,15 +137,120 @@ class TasteS3GenerationLM(Qwen2LM):
 
     @torch.inference_mode()
     def inference_bistream(
-            self,
-            text: Generator,
-            prompt_text: torch.Tensor,
-            prompt_text_len: torch.Tensor,
-            prompt_speech_token: torch.Tensor,
-            prompt_speech_token_len: torch.Tensor,
-            embedding: torch.Tensor,
-            sampling: int = 25,
-            max_token_text_ratio: float = 20,
-            min_token_text_ratio: float = 2,
-    ) -> Generator[torch.Tensor, None, None]:
-        raise NotImplementedError
+        self,
+        input_generator: Generator[Tuple[torch.Tensor, torch.Tensor], None, None], # text_token_ids (size=[1, 1]), taste_embs (size=[1, taste_dim])
+        prompt_text: torch.Tensor,
+        prompt_text_len: torch.Tensor,
+        prompt_speech_feature: torch.Tensor,
+        prompt_speech_feature_len: torch.Tensor,
+        sampling: int = 25,
+        max_token_text_ratio: float = 20,
+        min_token_text_ratio: float = 2,
+        uuid: str = '',
+        **kwargs,
+    ) -> Generator[torch.Tensor, None, None]: # s3_token_ids (size=[1, s3_len])
+        
+        device = prompt_text.device
+        
+        # 1. Prepare initial input
+        sos_eos_emb = self.llm_embedding.weight[self.sos_eos].reshape(1, 1, -1)
+        task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1)
+        lm_input = torch.concat([sos_eos_emb], dim=1)
+        
+        # 2. Process prompt to get initial mixed embeddings (treat as part of text_cache)
+        if prompt_text.size(1) > 0:
+            prompt_text_emb = self.llm.forward_embed_tokens(prompt_text).float()
+            
+            if not self.is_text_only and prompt_speech_feature_len > 0:
+                # Use taste_tokenizer to generate taste embedding from prompt audio features
+                tokenized = self.taste_tokenizer(prompt_text, prompt_text_len, prompt_speech_feature, prompt_speech_feature_len)
+                prompt_taste_emb = tokenized['taste_token_emb']
+                
+                # Mix prompt text and taste embeddings
+                text_cache = self.taste_decoder_mixer(prompt_text_emb, prompt_taste_emb, prompt_text_len)
+            else:
+                text_cache = prompt_text_emb
+        else:
+            text_cache = torch.zeros(1, 0, self.llm_input_size, dtype=torch.float32).to(device)
+        
+        # 3. Bistream generation following the original mechanism
+        out_tokens = []
+        cache = None
+        next_fill_index = -1
+        
+        for text_token, taste_emb in input_generator:
+            text_token = text_token.unsqueeze(0)
+            # Get text embedding and mix with taste embedding
+            text_emb = self.llm.forward_embed_tokens(text_token).float()
+            text_len = torch.tensor([text_token.size(1)], device=device)
+            
+            if not self.is_text_only and taste_emb is not None:
+                # Mix text and taste embeddings
+                mixed_emb = self.taste_decoder_mixer(text_emb, taste_emb, text_len)
+            else:
+                mixed_emb = text_emb
+            
+            # Append to text cache (these are treated as "text" tokens in bistream)
+            text_cache = torch.concat([text_cache, mixed_emb], dim=1)
+            
+            # Generate speech tokens when we have enough "text" tokens
+            if (len(out_tokens) != 0 and out_tokens[-1] == self.speech_token_size + 2) or (len(out_tokens) == 0 and lm_input.size(1) == 1):
+                logging.info('get fill token, need to append more text token')
+                if text_cache.size(1) >= self.mix_ratio[0]:
+                    lm_input_text = text_cache[:, :self.mix_ratio[0]]
+                    logging.info('append {} text token'.format(lm_input_text.size(1)))
+                    if len(out_tokens) != 0 and out_tokens[-1] == self.speech_token_size + 2:
+                        lm_input = lm_input_text
+                    else:
+                        lm_input = torch.concat([lm_input, lm_input_text], dim=1)
+                    text_cache = text_cache[:, self.mix_ratio[0]:]
+                else:
+                    logging.info('not enough text token to decode, wait for more')
+                    continue
+                    
+            # Generate speech tokens
+            while True:
+                seq_len = lm_input.shape[1] if cache is None else lm_input.shape[1] + cache[0][0].size(2)
+                y_pred, cache = self.llm.forward_one_step(lm_input,
+                                                          masks=torch.tril(torch.ones((1, seq_len, seq_len), device=lm_input.device)).to(torch.bool),
+                                                          cache=cache)
+                logp = self.llm_decoder(y_pred[:, -1].float()).log_softmax(dim=-1)
+                
+                if next_fill_index != -1 and len(out_tokens) == next_fill_index:
+                    top_ids = self.speech_token_size + 2
+                    next_fill_index += (self.mix_ratio[1] + 1)
+                else:
+                    top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=True).item()
+                    
+                if top_ids == self.speech_token_size + 2:
+                    next_fill_index = len(out_tokens) + self.mix_ratio[1] + 1
+                    logging.info('fill_token index {} next fill_token index {}'.format(len(out_tokens), next_fill_index))
+                    
+                out_tokens.append(top_ids)
+                if top_ids >= self.speech_token_size:
+                    if top_ids == self.speech_token_size + 2:
+                        break
+                    else:
+                        raise ValueError('should not get token {}'.format(top_ids))
+                yield top_ids
+                lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
+
+        # 4. Final decode
+        lm_input = torch.concat([lm_input, text_cache, task_id_emb], dim=1)
+        logging.info('no more text token, decode until met eos')
+        while True:
+            seq_len = lm_input.shape[1] if cache is None else lm_input.shape[1] + cache[0][0].size(2)
+            y_pred, cache = self.llm.forward_one_step(lm_input,
+                                                      masks=torch.tril(torch.ones((1, seq_len, seq_len), device=lm_input.device)).to(torch.bool),
+                                                      cache=cache)
+            logp = self.llm_decoder(y_pred[:, -1].float()).log_softmax(dim=-1)
+            top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=False).item()
+            out_tokens.append(top_ids)
+            if top_ids >= self.speech_token_size:
+                if top_ids == self.speech_token_size:
+                    break
+                else:
+                    raise ValueError('should not get token {}'.format(top_ids))
+            # in stream mode, yield token one by one
+            yield top_ids
+            lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)

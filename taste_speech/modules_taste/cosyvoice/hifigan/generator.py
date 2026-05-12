@@ -128,7 +128,7 @@ class SineGen(torch.nn.Module):
 
     def _f02uv(self, f0):
         # generate uv signal
-        uv = (f0 > self.voiced_threshold).type(torch.float32)
+        uv = (f0 > self.voiced_threshold).to(f0.dtype)  # instead of .type(torch.float32)
         return uv
 
     @torch.no_grad()
@@ -138,7 +138,7 @@ class SineGen(torch.nn.Module):
         :return: [B, 1, sample_len]
         """
 
-        F_mat = torch.zeros((f0.size(0), self.harmonic_num + 1, f0.size(-1))).to(f0.device)
+        F_mat = torch.zeros((f0.size(0), self.harmonic_num + 1, f0.size(-1)), dtype=f0.dtype).to(f0.device)  
         for i in range(self.harmonic_num + 1):
             F_mat[:, i: i + 1, :] = f0 * (i + 1) / self.sampling_rate
 
@@ -210,7 +210,7 @@ class SourceModuleHnNSF(torch.nn.Module):
             sine_wavs, uv, _ = self.l_sin_gen(x.transpose(1, 2))
             sine_wavs = sine_wavs.transpose(1, 2)
             uv = uv.transpose(1, 2)
-        sine_merge = self.l_tanh(self.l_linear(sine_wavs))
+        sine_merge = self.l_tanh(self.l_linear(sine_wavs.to(self.l_linear.weight.dtype)))
 
         # source for noise branch, in the same shape as uv
         noise = torch.randn_like(uv) * self.sine_amp / 3
@@ -328,12 +328,19 @@ class HiFTGenerator(nn.Module):
         spec = torch.view_as_real(spec)  # [B, F, TT, 2]
         return spec[..., 0], spec[..., 1]
 
-    def _istft(self, magnitude, phase):
-        magnitude = torch.clip(magnitude, max=1e2)
-        real = magnitude * torch.cos(phase)
-        img = magnitude * torch.sin(phase)
-        inverse_transform = torch.istft(torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device))
-        return inverse_transform
+    def _istft(self, magnitude, phase):  
+        magnitude = torch.clip(magnitude, max=1e2)  
+        real = magnitude * torch.cos(phase)  
+        img = magnitude * torch.sin(phase)  
+        orig_dtype = real.dtype  
+        inverse_transform = torch.istft(  
+            torch.complex(real.float(), img.float()),  
+            self.istft_params["n_fft"],  
+            self.istft_params["hop_len"],  
+            self.istft_params["n_fft"],  
+            window=self.stft_window.to(magnitude.device).float()  
+        )  
+        return inverse_transform.to(orig_dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         f0 = self.f0_predictor(x)

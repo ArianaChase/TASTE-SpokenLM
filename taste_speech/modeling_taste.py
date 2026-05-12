@@ -53,6 +53,7 @@ class TasteAudioTower(nn.Module):
                 'whisper_config': WhisperConfig(),
                 'target_hidden_layer': 6,
                 'unfreeze_hidden_layers_from_last': 1,
+                'dtype': 'bfloat16'
             }
 
         if kwargs_audio_segmenter is None:
@@ -179,7 +180,7 @@ class TasteAudioTower(nn.Module):
 
         if self.quantization_on and not kwargs.get('skip_vq_in_audio_encoder', False):
             quantized_results = self.vq(
-                audio_unit_embeds,
+                audio_unit_embeds.to(torch.bfloat16),
                 mask=generate_mask_from_length(audio_unit_lengths)
             )
             audio_unit_embeds = quantized_results['quantized_feats']

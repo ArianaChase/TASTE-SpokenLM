@@ -130,7 +130,7 @@ class WhisperAudioEncoderForJoint(BaseAudioEncoder):
         
         return padded_tensors
 
-    @torch.cuda.amp.autocast()
+    @torch.amp.autocast("cuda", dtype=torch.bfloat16)
     def forward(
         self,
         audio_features: torch.Tensor,
@@ -333,7 +333,7 @@ class WhisperAudioJointEncoderSegmenter(BaseAudioJointEncoderSegmenter):
             target_linear_layer.weight.copy_(torch.eye(target_linear_layer.in_features))
             target_linear_layer.bias.fill_(0.0)
 
-    @torch.cuda.amp.autocast()
+    @torch.amp.autocast("cuda", dtype=torch.bfloat16)
     def forward(
         self,
         audio_features: torch.Tensor,

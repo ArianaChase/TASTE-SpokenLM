@@ -154,7 +154,7 @@ class WhisperAudioEncoder(BaseAudioEncoder):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
         # print(audio_features.shape)
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             input_features = audio_features.transpose(1, 2) # (B, T, C) -> (B, C, T)
 
             if input_features.shape[-1] != self.expected_seq_length:

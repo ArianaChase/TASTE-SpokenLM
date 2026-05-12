@@ -66,7 +66,7 @@ def get_nesty_module_by_key(orig_module: torch.nn.Module, target_key: str):
 def load_whisper_whole_model(
     model_name_or_path: str = "",
     attn_implementation: str = "eager", # select from ['eager', 'sdpa', 'flash_attention_2']
-    dtype: str = "float32", # select from ['float32', 'float16', 'bfloat16']
+    dtype: str = "bfloat16", # select from ['float32', 'float16', 'bfloat16']
     use_custom: bool = False,
     **kwargs,
 ):

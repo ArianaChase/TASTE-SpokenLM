@@ -89,6 +89,9 @@ class VoiceGenerator(nn.Module):
                 print(f'{name} is missing')
 
     def inference(self, speech_token_ids, speech_token_lengths, flow_embedding, output_fpath=None):
+        self.flow = self.flow.to(torch.bfloat16)  
+        self.hift = self.hift.to(torch.bfloat16)
+        
         device = speech_token_ids.device
         tts_mel = self.flow.inference(
             token=speech_token_ids,

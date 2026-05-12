@@ -26,7 +26,7 @@ class SinusoidalPosEmb(torch.nn.Module):
         emb = torch.exp(torch.arange(half_dim, device=device).float() * -emb)
         emb = scale * x.unsqueeze(1) * emb.unsqueeze(0)
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
+        return emb.to(x.dtype)
 
 
 class Block1D(torch.nn.Module):

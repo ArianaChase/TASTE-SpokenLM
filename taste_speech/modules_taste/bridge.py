@@ -391,7 +391,7 @@ class ContinueLatentLinearLastExtract(ExtractBase):
         vq_module=None,
         audio_embeds=None,
     ):
-        hidden = outputs.last_hidden_state.float()
+        hidden = outputs.last_hidden_state.to(self.fc_mu.weight.dtype)
 
         # compute the mean
         mu = self.fc_mu(hidden)

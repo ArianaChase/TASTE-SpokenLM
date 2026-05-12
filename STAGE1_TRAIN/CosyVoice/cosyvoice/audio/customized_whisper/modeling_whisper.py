@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch Whisper model."""
+from cosyvoice.audio.customized_sensevoice.model import LayerNorm  
 
 import math
 from typing import Optional, Tuple, Union, Dict
@@ -657,6 +658,7 @@ class WhisperEncoderLayer(nn.Module):
             dropout=config.attention_dropout,
             config=config,
         )
+        #self.self_attn_layer_norm = LayerNorm(self.embed_dim)  
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
@@ -664,6 +666,8 @@ class WhisperEncoderLayer(nn.Module):
         self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
         self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
+        #self.final_layer_norm = LayerNorm(self.embed_dim)
+
 
     def forward(
         self,
@@ -1024,14 +1028,19 @@ class WhisperEncoder(WhisperPreTrainedModel):
         self.max_source_positions = config.max_source_positions
         self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
-        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
+        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3, padding=1, dtype=torch.bfloat16)
+        #self.conv1 = self.conv1.to(torch.bfloat16)
+        #print("dtype at modeling_whisper 1028 is ", self.conv1.dtype, flush=True)
+
+        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1, dtype=torch.bfloat16)
 
         self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
         self.embed_positions.requires_grad_(False)
 
         self.layers = nn.ModuleList([WhisperEncoderLayer(config) for _ in range(config.encoder_layers)])
         self.layer_norm = nn.LayerNorm(config.d_model)
+        #self.layer_norm = LayerNorm(config.d_model)
+
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing

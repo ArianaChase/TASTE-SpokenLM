@@ -112,7 +112,7 @@ class WhisperAudioJointEncoderSegmenter(BaseAudioJointEncoderSegmenter):
             target_linear_layer.bias.fill_(0.0)
 
     # @torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
-    @torch.amp.autocast('cuda')
+    @torch.amp.autocast('cuda', dtype=torch.bfloat19)
     def forward(
         self,
         audio_features: torch.Tensor,

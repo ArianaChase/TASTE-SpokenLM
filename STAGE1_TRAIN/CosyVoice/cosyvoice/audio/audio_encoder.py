@@ -153,8 +153,9 @@ class WhisperAudioEncoder(BaseAudioEncoder):
         target_hidden_layer: int = 6, # specify which layer to extract. NOTE: zero means to extract the embed feature. Set to -1 to extract all hidden
         encoder_model: nn.Module = None, # allow passing a WhisperEncoder down for usage.
         attn_implementation: str = "eager", # possible choices: [eager, sdpa, flash_attention_2]
-        dtype: str = "float32",
+        dtype: str = "bfloat16",
     ):
+        print("dtype is ", dtype)
         super().__init__()
         if encoder_model == None:
             whole_model, _torch_dtype = load_whisper_whole_model(
@@ -222,9 +223,10 @@ class WhisperAudioEncoder(BaseAudioEncoder):
         
         return padded_tensors
 
-    # @torch.cuda.amp.autocast()
-    # @torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
-    @torch.amp.autocast('cuda')
+    #@torch.cuda.amp.autocast()
+    #@torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
+    #@torch.amp.autocast('cuda')
+    @torch.amp.autocast('cuda', dtype=torch.bfloat16)  
     def forward(
         self,
         audio_features: torch.Tensor,
@@ -253,7 +255,9 @@ class WhisperAudioEncoder(BaseAudioEncoder):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
         # print(audio_features.shape)
-        input_features = audio_features.transpose(1, 2) # (B, T, C) -> (B, C, T)
+
+        input_features = audio_features.transpose(1, 2).to(torch.bfloat16)   # (B, T, C) -> (B, C, T)
+        print("dtype at audio_encoder 260 is ", input_features.dtype)
 
         if input_features.shape[-1] != self.expected_seq_length:
             if input_features.shape[-1] < self.expected_seq_length:
@@ -264,7 +268,7 @@ class WhisperAudioEncoder(BaseAudioEncoder):
                 raise ValueError(
                     f"Whisper expects the mel input features to be of length {expected_seq_length}, but found {input_features.shape[-1]}. Make sure to pad the input mel features to {expected_seq_length}."
                 )
-        # print(input_features.dtype)
+            
         inputs_embeds = nn.functional.gelu(self.encoder.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.encoder.conv2(inputs_embeds))
 

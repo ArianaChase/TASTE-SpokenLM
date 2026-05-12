@@ -328,7 +328,7 @@ class TasteProcessor(ProcessorMixin):
         asr_pipeline = pipeline(
             'automatic-speech-recognition',
             model=path,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             device=0,
             chunk_length_s=30,
         )

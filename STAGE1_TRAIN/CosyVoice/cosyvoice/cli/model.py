@@ -55,7 +55,8 @@ class CosyVoiceModel:
             print("Directly use target speech unit (s3 token) for speech generation. Skip llm speech decoder")
             tts_speech_token = llm_prompt_speech_token
         else:
-            tts_speech_token = self.llm.inference(
+            print(type(self.llm))
+            result = self.llm.inference(
                 text=text.to(self.device),
                 text_len=text_len.to(self.device),
                 prompt_text=prompt_text.to(self.device),
@@ -71,6 +72,10 @@ class CosyVoiceModel:
                 asr_alignment=asr_alignment,
                 **llm_kwargs,
             )
+            print(result)
+            tts_speech_token = result[0]
+            ppl_results = result[1]
+        
         print('llm time:', time.time()-cur_time)
         print(f"text shape: {text.shape}")
         print(f"text len shape: {text_len.shape}")
@@ -92,4 +97,4 @@ class CosyVoiceModel:
         tts_speech = self.hift.inference(mel=tts_mel).cpu()
         print('hift time:', time.time()-cur_time)
         torch.cuda.empty_cache()
-        return {'tts_speech': tts_speech}
+        return {'tts_speech': tts_speech, 'ppl_results': ppl_results}

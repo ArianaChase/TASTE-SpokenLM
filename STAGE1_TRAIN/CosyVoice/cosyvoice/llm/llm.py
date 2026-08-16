@@ -123,7 +123,7 @@ class TransformerLM(torch.nn.Module):
             self,
             batch: dict,
             device: torch.device,
-    ) -> Dict[str, Optional[torch.Tensor]]:
+    ):
         """
         Args:
             text: (B, L, D)
@@ -163,10 +163,10 @@ class TransformerLM(torch.nn.Module):
         # 6. run lm forward
         lm_output, lm_output_mask = self.llm(lm_input, lm_input_len.to(device))
         logits = self.llm_decoder(lm_output)
-        loss = self.criterion_ce(logits, lm_target)
-        acc = th_accuracy(logits.view(-1, self.speech_token_size + 1), lm_target, ignore_label=IGNORE_ID)
-        valid_length = torch.sum(lm_target != IGNORE_ID).detach()
-        return {'loss': loss, 'acc': acc, 'len': valid_length}
+        # loss = self.criterion_ce(logits, lm_target)
+        # acc = th_accuracy(logits.view(-1, self.speech_token_size + 1), lm_target, ignore_label=IGNORE_ID)
+        # valid_length = torch.sum(lm_target != IGNORE_ID).detach()
+        return logits, lm_target
 
     def sampling_ids(
             self,

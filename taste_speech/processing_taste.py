@@ -251,7 +251,6 @@ class TasteProcessor(ProcessorMixin):
         })
 
         words = None
-        text = None
         if self.asr_on:
             result = self.asr_pipeline(
                 {'raw': audio, 'sampling_rate': sampling_rate},

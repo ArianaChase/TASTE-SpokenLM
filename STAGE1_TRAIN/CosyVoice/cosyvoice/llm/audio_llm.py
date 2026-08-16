@@ -246,7 +246,9 @@ class TransformerJointLM(TransformerLM):
             adopt_teacher_forcing_for_test: bool = False,
             drop_eos_before_llm: bool = False,
             **kwargs,
-    ) -> torch.Tensor:
+    ):
+        print(f"HELLO -> {adopt_teacher_forcing_for_test}", flush=True)
+
         device = text.device
         assert prompt_text.shape[1] == 0, f"Doesn't support prompting mode when using audio llm (weired behavior)!"
         text_token = torch.concat([prompt_text, text], dim=1)
@@ -330,13 +332,28 @@ class TransformerJointLM(TransformerLM):
         min_len = int((text_token_len - prompt_text_len) * min_token_text_ratio)
         max_len = int((text_token_len - prompt_text_len) * max_token_text_ratio)
 
+
         # 4.5 teacher forcing decode for testing
         if adopt_teacher_forcing_for_test:
+            print(f"teachering", flush=True)
+
+
             lm_input_with_teacher = torch.concat([sos_eos_emb, embedding, audio_text_token_encoded, task_id_emb, speech_token_emb], dim=1)
             prepend_length = sos_eos_emb.size(1) + embedding.size(1) + audio_text_token_encoded.size(1) 
             lm_input_len = torch.tensor([prepend_length + 1 + speech_token_emb.size(1)], dtype=torch.int32).to(device)
             lm_output, lm_output_mask = self.llm(lm_input_with_teacher, lm_input_len.to(device))
             logits = self.llm_decoder(lm_output)
+
+            print("Length of logits: ", len(logits))
+
+            surprisal = F.cross_entropy(  
+                logits.view(-1, logits.size(-1)),   
+                speech_token.view(-1),   
+                reduction='none'  
+            ).view(speech_token.shape)
+
+            print(f"Surprisal length: {len(surprisal)}")
+
             output_token = logits.argmax(-1)[:, prepend_length:(prepend_length+speech_token.size(-1))].to(torch.int32)
             eos_mask = (output_token == self.speech_token_size)
             print(f"There are {eos_mask.sum()} invalid pred tokens, set it to {IGNORE_ID}")
@@ -350,7 +367,9 @@ class TransformerJointLM(TransformerLM):
             print(output_token[0][-10:], speech_token[0][-10:])
             denominator = torch.sum(mask)
             print(f"Accuracy: {(numerator / denominator).detach().item():.4f}")
-            return output_token
+
+            print("HELLO")
+            return (output_token, surprisal)
         
         # 5. step by step decode
         out_tokens = []

@@ -136,4 +136,6 @@ class CosyVoice:
         }
         print(f"llm_kwargs: {model_input['llm_kwargs']}")
         model_output = self.model.inference(**model_input)
+
+        print(model_output)
         return model_output

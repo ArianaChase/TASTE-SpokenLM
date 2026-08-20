@@ -15,7 +15,7 @@
 
 import json
 import torchaudio
-
+import torch
 
 def read_lists(list_file):
     lists = []
@@ -34,6 +34,15 @@ def read_json_lists(list_file):
 
 def load_wav(wav, target_sr):
     speech, sample_rate = torchaudio.load(wav)
+    speech = speech.mean(dim=0, keepdim=True)
+    if sample_rate != target_sr:
+        assert sample_rate > target_sr, 'wav sample rate {} must be greater than {}'.format(sample_rate, target_sr)
+        speech = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sr)(speech)
+    return speech
+
+def load_wav_array(array, sr, target_sr):
+    speech = torch.from_numpy(array).float().unsqueeze(0)  
+    sample_rate = sr
     speech = speech.mean(dim=0, keepdim=True)
     if sample_rate != target_sr:
         assert sample_rate > target_sr, 'wav sample rate {} must be greater than {}'.format(sample_rate, target_sr)

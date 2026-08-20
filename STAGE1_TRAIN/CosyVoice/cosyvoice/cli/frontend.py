@@ -28,6 +28,8 @@ use_ttsfrd = False
 from cosyvoice.utils.frontend_utils import contains_chinese, replace_blank, replace_corner_mark, remove_bracket, spell_out_number, split_paragraph
 from transformers import WhisperTokenizerFast
 
+#onnxruntime.set_default_logger_severity(1)
+
 class CosyVoiceFrontEnd:
 
     def __init__(
@@ -49,11 +51,17 @@ class CosyVoiceFrontEnd:
         self.tokenizer = get_tokenizer()
         self.feat_extractor = feat_extractor
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print("DEVICE: ", self.device)
         option = onnxruntime.SessionOptions()
         option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         option.intra_op_num_threads = 1
-        self.campplus_session = onnxruntime.InferenceSession(campplus_model, sess_options=option, providers=["CPUExecutionProvider"])
+        self.campplus_session = onnxruntime.InferenceSession(campplus_model, sess_options=option, providers=[("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"])
         self.speech_tokenizer_session = onnxruntime.InferenceSession(speech_tokenizer_model, sess_options=option, providers=["CUDAExecutionProvider" if torch.cuda.is_available() else "CPUExecutionProvider"])
+
+        print("CAMPLUS:", self.campplus_session.get_providers())
+        print("SPEECH:", self.speech_tokenizer_session.get_providers())
+
+
         if os.path.exists(spk2info):
             self.spk2info = torch.load(spk2info, map_location=self.device)
         self.instruct = instruct

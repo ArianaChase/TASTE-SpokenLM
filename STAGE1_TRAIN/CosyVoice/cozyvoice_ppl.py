@@ -22,6 +22,13 @@ from sklearn.metrics import roc_auc_score
 import onnxruntime
 from torch.nn.utils.rnn import pad_sequence
 import pandas as pd
+import scipy.stats
+from sklearn.metrics import roc_auc_score
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
 
 cosyvoice = CosyVoice('/home/u5504709/new_work/speech_ppl/pretrained_models/CosyVoice-300M-SFT')
 frontend = cosyvoice.frontend
@@ -143,7 +150,7 @@ def process_batch(sample_buffer, cosyvoice, device):
         utterance_ppl = row_surprisal.mean().exp().item()
         timestamps_start = [(t * TOKEN_DURATION) for t in range(len(row_surprisal))]
         timestamps_end = [((t + 1) * TOKEN_DURATION) for t in range(len(row_surprisal))]
-        timestamped_surprisal = list(zip(timestamps_start, timestamps_end, row_surprisal.tolist()))
+        timestamped_surprisal = list(zip(row_surprisal.tolist(), timestamps_start, timestamps_end))
 
         sample_meta.update({'timestamped_surprisal' : timestamped_surprisal})
         batch_info.append(sample_meta)
@@ -175,8 +182,6 @@ def aggregate_batch(batch_losses, granularity, pooling, norm_dict):
                     t_end = loss_item[2]
                     if is_overlapping(a_start, a_end, t_start, t_end):
                         losses.append(loss_item[0])
-
-                print("LENGTH OF LOSSES: ", len(losses))
                 
                 # pooling
                 loss_pooled = np.nan
@@ -394,7 +399,8 @@ def get_losses(dataset, labels_dict, alignments_path, granularity, pooling, norm
 
         if len(sample_buffer) == BATCH_SIZE:
             batch_losses = process_batch(sample_buffer, cosyvoice, device)                  # inference and get losses for batch
-            batch_results, nan_count = aggregate_batch(batch_losses, granularity, pooling, norm_dict)  # pool and norm per granularity
+            batch_results, batch_nan_count = aggregate_batch(batch_losses, granularity, pooling, norm_dict)  # pool and norm per granularity
+            nan_count += batch_nan_count
             ppl_results += batch_results
             sample_buffer = []
 
@@ -402,7 +408,8 @@ def get_losses(dataset, labels_dict, alignments_path, granularity, pooling, norm
 
     if len(sample_buffer) > 0:
         batch_losses = process_batch(sample_buffer, cosyvoice, device)
-        batch_results, nan_count = aggregate_batch(batch_losses, granularity, pooling, norm_dict)
+        batch_results, batch_nan_count = aggregate_batch(batch_losses, granularity, pooling, norm_dict)
+        nan_count += batch_nan_count
         ppl_results.extend(batch_results)
     
     print(f"FILES RECORDED: {file_count}")
@@ -411,6 +418,74 @@ def get_losses(dataset, labels_dict, alignments_path, granularity, pooling, norm
         "results" : ppl_results,
         "nan_count" : nan_count
     }
+
+def append_to_sheet(
+    row_data,
+    spreadsheet_name="ICASSP 2026 Experiment Results",
+    worksheet_name="main",
+    service_account_file="/home/u5504709/new_work/speech_ppl/src/service_account.json"
+):
+    # Authenticate
+    creds = Credentials.from_service_account_file(
+        service_account_file,
+        scopes=SCOPES
+    )
+
+    client = gspread.authorize(creds)
+
+    # Open sheet
+    spreadsheet = client.open(spreadsheet_name)
+    worksheet = spreadsheet.worksheet(worksheet_name)
+
+    # Append row
+    worksheet.append_row(row_data)
+
+    print("Spreadsheet updated successfully.")
+
+def per_phone_auc(results):
+
+    phone_auc_dict = {}
+
+    for result in results:
+        if result['label'] not in list(phone_auc_dict.keys()):
+            phone_auc_dict[result['label']] = {
+                'auc_labels' : [result['auc_label']],
+                'ppl_losses' : [result['ppl_loss']],
+                'ppl_norm_losses' : [result['ppl_loss_norm']],
+            }
+        else:
+            phone_auc_dict[result['label']]['auc_labels'].append(result['auc_label'])
+            phone_auc_dict[result['label']]['ppl_losses'].append(result['ppl_loss'])
+            phone_auc_dict[result['label']]['ppl_norm_losses'].append(result['ppl_loss_norm'])
+    
+    roc_auc_scores = []
+    roc_auc_scores_norm = []
+
+    for phone, item in phone_auc_dict.items():
+        df = pd.DataFrame(item)
+        df = df.dropna(axis=0, subset=['ppl_losses', 'auc_labels'])
+
+        y_true = df['auc_labels']
+        y_score = df['ppl_losses']
+
+        if len(np.unique(y_true)) != 1 and len(y_score) >= 1:
+            auc = roc_auc_score(y_true, y_score)
+            roc_auc_scores.append(auc)
+
+        df = pd.DataFrame(item)
+        df = df.dropna(axis=0, subset=['ppl_norm_losses', 'auc_labels'])
+        y_true_norm = df['auc_labels']
+        y_score_norm = df['ppl_norm_losses']
+
+        if len(np.unique(y_true_norm)) != 1 and len(y_score_norm) >= 1:
+            auc = roc_auc_score(y_true_norm, y_score_norm) # because 0 - 1 is akin to big loss - small loss
+            roc_auc_scores_norm.append(auc)
+
+    return {
+        'auc' : np.nanmean(roc_auc_scores) if len(roc_auc_scores) >= 1 else "n/a",
+        'auc_norm' : np.nanmean(roc_auc_scores_norm) if len(roc_auc_scores_norm) >= 1 else "n/a"
+    }
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -434,21 +509,79 @@ if __name__ == "__main__":
     print(f"Processed {len(processed_dataset)} samples.")
 
     NORM_DICT_DIR = f"/home/u5504709/new_work/speech_ppl/src/gslm/tools/result_dicts"
+    MODEL_TYPE = "COSYVOICE"
     MODEL_NAME = f"COSYVOICE"
     granularity = "phone"
     pool = "mean"
 
-    with open(f"{NORM_DICT_DIR}/{MODEL_NAME}_{granularity}_{pool}_norm.json", "r") as f:
-        norm_dict = json.load(f)
- 
-    results = get_losses(
-        dataset=processed_dataset, 
-        labels_dict=human_scores, 
-        alignments_path=args.alignments_file, 
-        granularity=granularity,
-        pooling=pool,
-        norm_dict=norm_dict,
-        limit=20,
-        )
+    for granularity in ["phone", "word", "utterance"]:
+        for pool in ['mean', 'max', 'std']:
 
-    print(list(result['ppl_loss_norm'] for result in results['results']))
+            if granularity == "phone" or granularity == "word":
+                with open(f"{NORM_DICT_DIR}/{MODEL_NAME}_{granularity}_{pool}_norm.json", "r") as f:
+                    norm_dict = json.load(f)
+            else:
+                norm_dict = None    
+
+            results = get_losses(
+                dataset=processed_dataset, 
+                labels_dict=human_scores, 
+                alignments_path=args.alignments_file, 
+                granularity=granularity,
+                pooling=pool,
+                norm_dict=norm_dict,
+                limit=None,
+                )
+
+            ppl_results = results["results"]
+            nan_percent = (results["nan_count"] / len(ppl_results)) * 100
+            
+            # correlate
+            df = pd.DataFrame(ppl_results)
+            df.dropna(axis=0, subset=df.columns.drop('ppl_loss_norm'), inplace=True)
+            x = df["ppl_loss"]
+            y = df["human_score"]
+            pcc = scipy.stats.pearsonr(x, y)
+
+            # auc
+            y_score = df["ppl_loss"]
+            y_true = df["auc_label"]
+            if len(np.unique(y_true)) != 1:
+                auc = roc_auc_score(y_true, y_score)
+            else:
+                auc = "n/a"
+
+            if granularity == "phone" or granularity == "word":
+                df_norm = pd.DataFrame(ppl_results)
+                df_norm.dropna(axis=0, inplace=True)
+                x_norm = df_norm["ppl_loss_norm"]
+                y_norm = df_norm["human_score"]
+                pcc_norm = scipy.stats.pearsonr(x_norm, y_norm)
+                pcc_norm_stats = pcc_norm.statistic
+                pcc_norm_pvalue = pcc_norm.pvalue
+
+                y_score_norm = df_norm["ppl_loss_norm"]
+                y_true_norm = df_norm["auc_label"]
+                if len(np.unique(y_true_norm)) != 1:
+                    auc_norm = roc_auc_score(y_true_norm, y_score_norm)
+                else:
+                    auc_norm = "n/a"
+            
+            else:
+                pcc_norm_stats = "n/a"
+                pcc_norm_pvalue = "n/a"
+                auc_norm = "n/a"
+
+            if granularity == "phone":
+                per_phone_auc_result = per_phone_auc(ppl_results)
+            else:
+                per_phone_auc_result = {
+                    "auc" : "n/a",
+                    "auc_norm" : "n/a"
+                }
+                
+            # Record in CSV
+            append_to_sheet([MODEL_TYPE, MODEL_NAME, granularity, pool, pcc.statistic, pcc.pvalue, pcc_norm_stats, pcc_norm_pvalue, auc, per_phone_auc_result['auc'], auc_norm, per_phone_auc_result['auc_norm'], f"{nan_percent:2f}" + "%", len(df)])
+            
+    
+

@@ -511,11 +511,14 @@ if __name__ == "__main__":
     NORM_DICT_DIR = f"/home/u5504709/new_work/speech_ppl/src/gslm/tools/result_dicts"
     MODEL_TYPE = "COSYVOICE"
     MODEL_NAME = f"COSYVOICE"
+    OUTPUT_DIR = args.output_dir
     granularity = "phone"
     pool = "mean"
 
     for granularity in ["phone", "word", "utterance"]:
         for pool in ['mean', 'max', 'std']:
+
+            csv_path = f"{OUTPUT_DIR}/{MODEL_TYPE}_{MODEL_NAME}_{granularity}_{pool}_losses.csv"
 
             if granularity == "phone" or granularity == "word":
                 with open(f"{NORM_DICT_DIR}/{MODEL_NAME}_{granularity}_{pool}_norm.json", "r") as f:
@@ -535,7 +538,13 @@ if __name__ == "__main__":
 
             ppl_results = results["results"]
             nan_percent = (results["nan_count"] / len(ppl_results)) * 100
-            
+
+            with open(csv_path, "w") as f:
+                fieldnames = ppl_results[0].keys()
+                dict_writer = csv.DictWriter(f, fieldnames)
+                dict_writer.writeheader()
+                dict_writer.writerows(ppl_results)
+
             # correlate
             df = pd.DataFrame(ppl_results)
             df.dropna(axis=0, subset=df.columns.drop('ppl_loss_norm'), inplace=True)

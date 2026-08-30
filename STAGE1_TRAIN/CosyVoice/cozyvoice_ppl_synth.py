@@ -43,7 +43,7 @@ BATCH_SIZE = 8
 print(torch.cuda.is_available())
 print(onnxruntime.get_available_providers())
 
-def process_synth(input_dataset, audio_version):
+def process_synth(input_dataset, audio_version, metadata, text_version):
 
         audio_file_info = []
 
@@ -51,17 +51,24 @@ def process_synth(input_dataset, audio_version):
 
         for file_path in pbar:
             audio_path = f"{input_dataset}/{file_path}"
-            file_metadata = os.path.basename(audio_path).split("_")
+            file_metadata = os.path.basename(audio_path).split("_")            
             filename = file_metadata[0]
             ver = Path(file_metadata[1]).stem
+            metadata_obj = metadata[metadata["stim_id"] == filename].iloc[0]
 
             if ver != audio_version:
                 continue
 
+            if text_version == "clean":
+                text = metadata_obj['canonical_text']
+            else:
+                text = metadata_obj['substituted_text']
+
             audio_file_info.append({
                 "filename" : filename,
                 "audio_version" : ver,
-                "path" : audio_path
+                "path" : audio_path,
+                "text" : text
             })
         return {
             "processed" : audio_file_info,
@@ -166,12 +173,11 @@ def get_losses(dataset, labels_dict, alignments_path, spk_emb_type, spk_emb_dict
         audio_version = sample['audio_version']
         file_path = sample["path"]
         filename = sample["filename"]
+        text = sample['text']
         pbar.set_description(f"Getting per phone losses for file: {filename}")
 
-        metadata_obj = metadata[metadata["stim_id"] == filename].iloc[0]
-
         # sample pre-processing
-        canonical_text = metadata_obj['canonical_text']
+        canonical_text = text
         wav = load_wav(file_path, 16000)
         text_token, text_token_len = frontend._extract_text_token(canonical_text)
         speech_token, speech_token_len = frontend._extract_speech_token(wav)
@@ -206,7 +212,7 @@ def get_losses(dataset, labels_dict, alignments_path, spk_emb_type, spk_emb_dict
             'audio_version' : audio_version,
             'file_path' : file_path,
             'filename' : filename,
-            'text' : metadata_obj['canonical_text']
+            'text' : text
         })      
 
         if len(sample_buffer) == BATCH_SIZE:
@@ -258,9 +264,12 @@ if __name__ == "__main__":
 
     # process dataset
     input_dataset = args.dataset_dir
-    AUDIO_VERSION = "dist"
+    AUDIO_VERSION = "clean"
+    TEXT_VERS = "sub"
+    METADATA_PATH = "/home/ubuntu/speech_ppl/src/stim_final/stimuli_metadata_v3.csv"
+    metadata = pd.read_csv(METADATA_PATH)
 
-    processed = process_synth(input_dataset, AUDIO_VERSION)
+    processed = process_synth(input_dataset, AUDIO_VERSION, metadata, TEXT_VERS)
     processed_dataset = processed["processed"]
     print(f"Processed {len(processed_dataset)} samples.")
 
@@ -270,9 +279,8 @@ if __name__ == "__main__":
     MODEL_NAME = f"COSYVOICE"
     OUTPUT_DIR = args.output_dir
     SPK_EMB_TYPE = "default"
-    METADATA_PATH = "/home/ubuntu/speech_ppl/src/stim_final/stimuli_metadata_v2.csv"
-    metadata = pd.read_csv(METADATA_PATH)
-    csv_path = f"{OUTPUT_DIR}/{MODEL_TYPE}_{MODEL_NAME}_{AUDIO_VERSION}_per_token_losses.csv"   
+
+    csv_path = f"{OUTPUT_DIR}/{MODEL_TYPE}_{MODEL_NAME}_{AUDIO_VERSION}_{TEXT_VERS}_per_token_losses.csv"   
 
     if SPK_EMB_TYPE == "native_retrieval":
         dict_path = SPK_EMB_DIR + "libri_spk_dict.json"

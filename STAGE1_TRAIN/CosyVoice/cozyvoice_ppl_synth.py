@@ -25,7 +25,7 @@ import pandas as pd
 import scipy.stats
 from sklearn.metrics import roc_auc_score
 import csv
-
+from pathlib import Path
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -43,22 +43,29 @@ BATCH_SIZE = 8
 print(torch.cuda.is_available())
 print(onnxruntime.get_available_providers())
 
-def parse_human_annotations(filename):
-    human_scores = {}
-    with open(filename) as json_data:
-        data = json.load(json_data)
-        for audio_file in data:
-            value = data[audio_file]
-            human_scores[audio_file] = {
-                "filename" : audio_file,
-                "accuracy" : value["accuracy"],
-                "fluency" : value["fluency"],
-                "prosodic" : value["prosodic"],
-                "completeness" : value["completeness"],
-                "words" : value["words"],
-                "text" : value["text"]
-            }
-    return human_scores
+def process_synth(input_dataset, audio_version):
+
+        audio_file_info = []
+
+        pbar = tqdm(os.listdir(input_dataset))
+
+        for file_path in pbar:
+            audio_path = f"{input_dataset}/{file_path}"
+            file_metadata = os.path.basename(audio_path).split("_")
+            filename = file_metadata[0]
+            ver = Path(file_metadata[1]).stem
+
+            if ver != audio_version:
+                continue
+
+            audio_file_info.append({
+                "filename" : filename,
+                "audio_version" : ver,
+                "path" : audio_path
+            })
+        return {
+            "processed" : audio_file_info,
+        }
 
 def is_overlapping(a_start, a_end, b_start, b_end):
     if (a_end >= b_start and a_start <= b_end):
@@ -72,43 +79,6 @@ def strip_stress(phone_label):
     else:
         return phone_label
     
-def process_speechocean(input_dataset):
-
-        audio_file_info = []
-        spk_count = 0
-        ignored_speakers = ["1076"]
-        removed = []
-
-        pbar = tqdm(sorted(os.listdir(input_dataset)))
-        files = 0
-        for spk_dir in pbar:
-            # if files >= 5:
-            #     break
-            spk_count += 1
-            speaker = spk_dir[7:None]
-            pbar.set_description(f"Processing speaker: {speaker}")
-            spk_dir_path = os.path.join(input_dataset, spk_dir)
-            for audio_file in os.listdir(spk_dir_path):
-                audio_path = os.path.join(spk_dir_path, audio_file)
-                filename = os.path.basename(audio_path)[0:9]
-                audio_file_info.append({
-                    "speaker" : speaker,
-                    "filename" : filename,
-                    "path" : audio_path
-                })
-            # files += 1
-        
-        for i in range(len(audio_file_info) - 1, -1, -1):
-            if audio_file_info[i]["speaker"] in ignored_speakers:
-                removed.append(audio_file_info.pop(i))
-                          
-
-        return {
-            "processed" : audio_file_info,
-            "ignored" : removed,
-            "spk_count" : spk_count - len(ignored_speakers)
-        }
-
 def collate_batch(samples):
     """samples = list of dicts, each with text_token, speech_token, embedding (all unbatched, single-utterance tensors)"""
     
@@ -150,18 +120,20 @@ def process_batch(sample_buffer, cosyvoice, device):
         # for each utterance:
         row_mask = mask[i]
         row_surprisal = surprisal_per_position[i][row_mask]
+        row_surprisal = row_surprisal[:-1]
 
         utterance_ppl = row_surprisal.mean().exp().item()
         timestamps_start = [(t * TOKEN_DURATION) for t in range(len(row_surprisal))]
         timestamps_end = [((t + 1) * TOKEN_DURATION) for t in range(len(row_surprisal))]
-        timestamped_surprisal = list(zip(row_surprisal.tolist(), timestamps_start, timestamps_end))
-
+        timestamped_surprisal = list(zip(row_surprisal.tolist(), timestamps_start, timestamps_end)) # a list of (row_surprisal[idx], t_start, t_end)
+        print(f"row surprisal: {len(row_surprisal)}")
+        print(f"speech_tokens: {sample_meta['speech_token'].squeeze(0).size(0)}")
         sample_meta.update({'timestamped_surprisal' : timestamped_surprisal})
         batch_info.append(sample_meta)
 
     return batch_info
 
-def get_losses(dataset, labels_dict, alignments_path, limit=None):
+def get_losses(dataset, labels_dict, alignments_path, spk_emb_type, spk_emb_dict, limit=None):
     '''
     dataset         : dataset object with speaker, filename, and path
     labels_dict     : dictionary of human annotated information, sorted by filename 
@@ -175,45 +147,55 @@ def get_losses(dataset, labels_dict, alignments_path, limit=None):
     file_count = 0
     lim = limit if limit != None else len(dataset)
 
-    # prepare and finalize alignments and dataset
-
-    with open(alignments_path, 'r') as f:
-            alignment_list = json.load(f)
-    
-    dataset_cleaned = []
-
-    for sample in dataset:
-        for idx in range(len(alignment_list) -1, -1, -1):
-            if sample['filename'] == alignment_list[idx]['audio_id']:
-                dataset_cleaned.append(sample)
-            if alignment_list[idx]['speaker'] == '1076':
-                alignment_list.pop(idx)
-                
-    if len(dataset_cleaned) != len(alignment_list):
-        raise Exception(f"Length mismatch between alignments ({len(alignment_list)}) and dataset ({len(dataset_cleaned)})")
-
-    pbar = tqdm(dataset_cleaned)
+    pbar = tqdm(dataset)
     sample_buffer = []
 
+    if spk_emb_type == "native_retrieval":
+        emb_arrays = []
+        for spk, emb in spk_emb_dict.items(): 
+            print(f"see what's inside the spk emb dict at each speaker: {torch.Tensor(emb).shape}") # emb should be (1, number of embeddings for the speaker)
+            emb_arrays += emb
+
+        emb_arrays = torch.Tensor(np.stack(emb_arrays)).to(device)
+    
     for sample in pbar:
         if file_count >= lim:
             break
 
         # info
-        speaker = sample["speaker"]
+        audio_version = sample['audio_version']
         file_path = sample["path"]
         filename = sample["filename"]
         pbar.set_description(f"Getting per phone losses for file: {filename}")
 
-        human_annotation_obj = labels_dict.get(filename)
+        metadata_obj = metadata[metadata["stim_id"] == filename].iloc[0]
 
         # sample pre-processing
-        canonical_text = human_annotation_obj['text']
+        canonical_text = metadata_obj['canonical_text']
         wav = load_wav(file_path, 16000)
         text_token, text_token_len = frontend._extract_text_token(canonical_text)
         speech_token, speech_token_len = frontend._extract_speech_token(wav)
-        embedding = frontend._extract_spk_embedding(wav)
+        spk_embedding = frontend._extract_spk_embedding(wav)
 
+        embedding = None
+
+        if spk_emb_type == "default":
+            embedding = spk_embedding
+        elif spk_emb_type == "native_retrieval":
+            sims = F.cosine_similarity(spk_embedding, emb_arrays, dim=1).cpu() # (1, ) * (40, 192)
+            idx = int(torch.argmax(sims)) 
+            embedding = emb_arrays[idx].unsqueeze(0)
+
+        elif spk_emb_type == "domestic_retrieval":
+            speaker_embs = spk_emb_dict.get(speaker)
+            embs = []
+            for file, emb in speaker_embs.items():
+                if file == filename:
+                    continue
+                embs.append(emb)
+
+            embedding = torch.Tensor(np.mean(embs, axis=0)).unsqueeze(0)
+            
         #print(f"load_wav: {t1-t0:.3f}s | text_token: {t2-t1:.3f}s | speech_token: {t3-t2:.3f}s | embedding: {t4-t3:.3f}s")
 
         # get losses
@@ -221,10 +203,10 @@ def get_losses(dataset, labels_dict, alignments_path, limit=None):
             'text_token': text_token,
             'speech_token': speech_token,
             'embedding': embedding,
-            'speaker' : speaker,
+            'audio_version' : audio_version,
             'file_path' : file_path,
             'filename' : filename,
-            'text' : human_annotation_obj['text']
+            'text' : metadata_obj['canonical_text']
         })      
 
         if len(sample_buffer) == BATCH_SIZE:
@@ -232,7 +214,7 @@ def get_losses(dataset, labels_dict, alignments_path, limit=None):
             for sample in batch_losses:
                 for idx, loss in enumerate(sample['timestamped_surprisal']):
                     ppl_results.append({
-                        'speaker' : sample['speaker'],
+                        'audio_version' : sample['audio_version'],
                         'file_path' : sample['file_path'],
                         'filename' : sample['filename'],
                         'token_id' : idx, 
@@ -249,7 +231,7 @@ def get_losses(dataset, labels_dict, alignments_path, limit=None):
         for sample in batch_losses:
             for idx, loss in enumerate(sample['timestamped_surprisal']):
                 ppl_results.append({
-                    'speaker' : sample['speaker'],
+                    'audio_version' : sample['audio_version'],
                     'file_path' : sample['file_path'],
                     'filename' : sample['filename'],
                     'token_id' : idx,
@@ -274,29 +256,41 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # get labels to compare to
-    score_labels = args.annotation_dir
-    human_scores = parse_human_annotations(score_labels)
-
     # process dataset
     input_dataset = args.dataset_dir
+    AUDIO_VERSION = "dist"
 
-    processed = process_speechocean(input_dataset)
+    processed = process_synth(input_dataset, AUDIO_VERSION)
     processed_dataset = processed["processed"]
-    ignored_samples = processed["ignored"]
-    spk_count = processed["spk_count"]
     print(f"Processed {len(processed_dataset)} samples.")
 
     NORM_DICT_DIR = f"{args.root_dir}/src/metrics/result_dicts"
+    SPK_EMB_DIR = f"{args.root_dir}/src/metrics/"
     MODEL_TYPE = "COSYVOICE"
     MODEL_NAME = f"COSYVOICE"
     OUTPUT_DIR = args.output_dir
-    csv_path = f"{OUTPUT_DIR}/{MODEL_TYPE}_{MODEL_NAME}_per_token_losses.csv"   
+    SPK_EMB_TYPE = "default"
+    METADATA_PATH = "/home/ubuntu/speech_ppl/src/stim_final/stimuli_metadata_v2.csv"
+    metadata = pd.read_csv(METADATA_PATH)
+    csv_path = f"{OUTPUT_DIR}/{MODEL_TYPE}_{MODEL_NAME}_{AUDIO_VERSION}_per_token_losses.csv"   
+
+    if SPK_EMB_TYPE == "native_retrieval":
+        dict_path = SPK_EMB_DIR + "libri_spk_dict.json"
+        with open(dict_path, "r") as f:
+            spk_emb_dict = json.load(f)
+    elif SPK_EMB_TYPE == "domestic_retrieval":
+        dict_path = SPK_EMB_DIR + "speechocean_spk_dict.json"
+        with open(dict_path, "r") as f:
+            spk_emb_dict = json.load(f)
+    else:
+        spk_emb_dict = None
 
     results = get_losses(
         dataset=processed_dataset, 
-        labels_dict=human_scores, 
+        labels_dict=metadata, 
         alignments_path=args.alignments_file, 
+        spk_emb_type=SPK_EMB_TYPE,
+        spk_emb_dict=spk_emb_dict,
         limit=None,
         )
 

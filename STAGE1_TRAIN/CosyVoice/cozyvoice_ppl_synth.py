@@ -45,34 +45,51 @@ print(onnxruntime.get_available_providers())
 
 def process_synth(input_dataset, audio_version, metadata, text_version):
 
-        audio_file_info = []
+    audio_file_info = []
 
-        pbar = tqdm(os.listdir(input_dataset))
+    pbar = tqdm(os.listdir(input_dataset))
 
-        for file_path in pbar:
-            audio_path = f"{input_dataset}/{file_path}"
-            file_metadata = os.path.basename(audio_path).split("_")            
-            filename = file_metadata[0]
-            ver = Path(file_metadata[1]).stem
+    for file_path in pbar:
+        audio_path = f"{input_dataset}/{file_path}"
+        file_metadata = os.path.basename(audio_path).split("_")            
+        filename = file_metadata[0]
+        ver = Path(file_metadata[1]).stem
+        if args.set == "setC":
+            #print(filename)
+            metadata_obj = metadata[metadata["utt_id"] == filename].iloc[0]
+        else:
             metadata_obj = metadata[metadata["stim_id"] == filename].iloc[0]
 
-            if ver != audio_version:
-                continue
+        if metadata_obj['has_foil'] != "yes" or metadata_obj['align_ok'] != "yes":
+            continue
+        if ver != audio_version:
+            continue
 
-            if text_version == "clean":
-                text = metadata_obj['canonical_text']
+        if args.test == "B":
+            if args.set == "setC":
+                if text_version == "real":
+                    text = metadata_obj['actual_text']
+                elif text_version == "foil":
+                    text = metadata_obj['foil_text']
+                elif text_version == "ref":
+                    text = metadata_obj['canonical_text']
             else:
-                text = metadata_obj['substituted_text']
+                if text_version == "clean":
+                    text = metadata_obj['canonical_text']
+                else:
+                    text = metadata_obj['substituted_text']
+        else:
+            text = metadata_obj['canonical_text']
 
-            audio_file_info.append({
-                "filename" : filename,
-                "audio_version" : ver,
-                "path" : audio_path,
-                "text" : text
-            })
-        return {
-            "processed" : audio_file_info,
-        }
+        audio_file_info.append({
+            "filename" : filename,
+            "audio_version" : ver,
+            "path" : audio_path,
+            "text" : text
+        })
+    return {
+        "processed" : audio_file_info,
+    }
 
 def is_overlapping(a_start, a_end, b_start, b_end):
     if (a_end >= b_start and a_start <= b_end):
@@ -175,7 +192,7 @@ def get_losses(dataset, labels_dict, alignments_path, spk_emb_type, spk_emb_dict
         filename = sample["filename"]
         text = sample['text']
         pbar.set_description(f"Getting per phone losses for file: {filename}")
-
+        #print(text)
         # sample pre-processing
         canonical_text = text
         wav = load_wav(file_path, 16000)
@@ -259,15 +276,17 @@ if __name__ == "__main__":
     parser.add_argument("--alignments_file", required=True)
     parser.add_argument("--root_dir", required=True)
     parser.add_argument("--output_dir")
+    parser.add_argument("--test")
+    parser.add_argument("--set")
 
     args = parser.parse_args()
 
     # process dataset
     input_dataset = args.dataset_dir
-    AUDIO_VERSION = "clean"
-    TEXT_VERS = "sub"
-    METADATA_PATH = "/home/ubuntu/speech_ppl/src/stim_final/stimuli_metadata_v3.csv"
-    metadata = pd.read_csv(METADATA_PATH)
+    AUDIO_VERSION = "real"
+    TEXT_VERS = "ref"
+    METADATA_PATH = "/home/ubuntu/speech_ppl/src/stim_final/setC_stimuli_list.csv"
+    metadata = pd.read_csv(METADATA_PATH, dtype=str)
 
     processed = process_synth(input_dataset, AUDIO_VERSION, metadata, TEXT_VERS)
     processed_dataset = processed["processed"]
@@ -280,7 +299,11 @@ if __name__ == "__main__":
     OUTPUT_DIR = args.output_dir
     SPK_EMB_TYPE = "default"
 
-    csv_path = f"{OUTPUT_DIR}/{MODEL_TYPE}_{MODEL_NAME}_{AUDIO_VERSION}_{TEXT_VERS}_per_token_losses.csv"   
+    if args.test == "A":
+        csv_path = f"{OUTPUT_DIR}/{MODEL_TYPE}_{MODEL_NAME}_{AUDIO_VERSION}_{args.set}_per_token_losses.csv"   
+
+    elif args.test == "B":
+        csv_path = f"{OUTPUT_DIR}/{MODEL_TYPE}_{MODEL_NAME}_{AUDIO_VERSION}_{TEXT_VERS}_{args.set}_per_token_losses.csv"   
 
     if SPK_EMB_TYPE == "native_retrieval":
         dict_path = SPK_EMB_DIR + "libri_spk_dict.json"

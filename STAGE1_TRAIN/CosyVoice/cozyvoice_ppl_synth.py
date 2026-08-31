@@ -283,7 +283,7 @@ if __name__ == "__main__":
 
     # process dataset
     input_dataset = args.dataset_dir
-    AUDIO_VERSION = "real"
+    AUDIO_VERSION = "ref"
     TEXT_VERS = "ref"
     METADATA_PATH = "/home/ubuntu/speech_ppl/src/stim_final/setC_stimuli_list.csv"
     metadata = pd.read_csv(METADATA_PATH, dtype=str)
